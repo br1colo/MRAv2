@@ -1,0 +1,464 @@
+﻿#################################################################################
+#										                                        #
+# PowerShell Script to export Lookout API device events and issues to generate  #
+# a powerBI dashboard													        #
+#										                                        #
+# For questions/comments, please contact <bastien.bobe@lookout.com>		        #
+#										                                        #
+# Last update 0.5 : August 2024                                                 #
+# - Lookout MRAv2 support           							                #
+#										                                        #
+#################################################################################
+
+#REST-API script to retrieve events from Lookout API
+
+
+#Get token from API
+#CHANGE IT WITH YOUR KEY
+$MES_KEY = ""
+
+# Path to export CSV files
+$path_export = "D:\PowerBIExport\"
+
+
+#################################################################################
+############################## Don't modify after ###############################
+#################################################################################
+
+
+# Start timer
+$start_time = Get-Date
+
+Write-Host "Contacting server"
+
+
+
+# API endpoint for token retrieval
+$API_ENDPOINT = "https://api.lookout.com/oauth2/token"
+
+# Authorization header with your application key
+$headers = @{
+    "Accept" = "application/json"
+    "Authorization" = "Bearer $MES_KEY"
+    "Content-Type" = "application/x-www-form-urlencoded"
+}
+
+# Data payload for the POST request
+$data = @{
+    "grant_type" = "client_credentials"
+}
+
+try {
+    # Send a POST request to retrieve the token
+    $response = Invoke-RestMethod -Uri $API_ENDPOINT -Method Post -Headers $headers -Body $data
+
+    Write-Host "Retrieving token"
+
+    # Display the access token for debugging
+    $access_token = $response.access_token
+} catch {
+    Write-Host "Token retrieval failed."
+    Write-Host $_.Exception.Response.StatusCode.Value__
+    Write-Host $_.Exception.Response.StatusDescription
+    Write-Host $_.Exception.Message
+    exit
+}
+
+# File path for CSV export
+$csvPathDevices = Join-Path -Path $path_export -ChildPath "LookoutMES-APIExport-Devices.csv"
+$csvPathIssues = Join-Path -Path $path_export -ChildPath "LookoutMES-APIExport-Issues.csv"
+$csvPathPCPIssues = Join-Path -Path $path_export -ChildPath "LookoutMES-APIExport-PCPThreats.csv"
+
+# Function to make API requests
+function Invoke-API {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$apiUrl
+    )
+    try {
+        return Invoke-RestMethod -Uri $apiUrl -Method Get -Headers @{ "Authorization" = "Bearer $access_token" }
+    } catch {
+        Write-Host "API call failed. Exception: $_"
+        Write-Host "API URL was $apiUrl"
+        return $null
+    }
+}
+
+# Function to export devices data to CSV
+function Export-DevicesToCsv {
+    param (
+        [Parameter(Mandatory=$true)]
+        [System.Collections.ArrayList]$devices,
+
+        [Parameter(Mandatory=$true)]
+        [string]$csvPathDevices,
+
+        [Parameter(Mandatory=$true)]
+        [bool]$writeHeaders
+    )
+
+    # Define the fields to export
+    $fields = @(
+        "guid", "oid", "enterprise_guid", "device_group_guid", 
+        "platform", "activation_status", "security_status", "protection_status",
+        "checkin_time", "activated_at", "details_external_id", "details_mdm_connector_id", "details_mdm_connector_uuid",
+        "locale", "mdm_type", "hardware_manufacturer", "hardware_model",
+        "software_os_version", "software_os_version_date", "software_latest_os_version", "software_sdk_version", "software_security_patch_level", "software_latest_security_patch_level",
+        "client_ota_version", "client_package_name", "client_package_version",
+        "device_settings_pcp_settings_enabled", "device_settings_pcp_settings_on_device_vpn",
+        "device_permissions_external_storage_permission", "device_permissions_notification_configuration", "device_permissions_vpn_configuration",
+        "risky_config_encryption", "risky_config_lock_screen", "risky_config_developer_mode", "risky_config_usb_debugging", "risky_config_install_non_market_apps", "risky_config_packages_with_admin",
+        "risky_config_risky_network_config_external_vpn_state", "risky_config_risky_network_config_external_vpn_state_changed_time",
+        "updated_time"
+    )
+
+    # Write headers to the CSV file if required
+    if ($writeHeaders) {
+        $headers = $fields -join ';'
+        Set-Content -Path $csvPathDevices -Value $headers
+    }
+
+    # Iterate over each device to create CSV lines
+    foreach ($device in $devices) {
+        # Create an array to hold the values for each field
+        $lineValues = @()
+
+        foreach ($field in $fields) {
+            switch ($field) {
+                "details_external_id" { $lineValues += $device.details.external_id }
+                "details_mdm_connector_id" { $lineValues += $device.details.mdm_connector_id }
+                "details_mdm_connector_uuid" { $lineValues += $device.details.mdm_connector_uuid }
+                "hardware_manufacturer" { $lineValues += $device.hardware.manufacturer }
+                "hardware_model" { $lineValues += $device.hardware.model }
+                "software_os_version" { $lineValues += $device.software.os_version }
+                "software_os_version_date" { $lineValues += $device.software.os_version_date }
+                "software_latest_os_version" { $lineValues += $device.software.latest_os_version }
+                "software_sdk_version" { $lineValues += $device.software.sdk_version }
+                "software_security_patch_level" { $lineValues += $device.software.security_patch_level }
+                "software_latest_security_patch_level" { $lineValues += $device.software.latest_security_patch_level }
+                "client_ota_version" { $lineValues += $device.client.ota_version }
+                "client_package_name" { $lineValues += $device.client.package_name }
+                "client_package_version" { $lineValues += $device.client.package_version }
+                "device_settings_pcp_settings_enabled" { $lineValues += $device.device_settings.pcp_settings.enabled }
+                "device_settings_pcp_settings_on_device_vpn" { $lineValues += $device.device_settings.pcp_settings.on_device_vpn }
+                "device_permissions_external_storage_permission" {
+                    $permission = $device.device_permissions | Where-Object { $_.name -eq "external_storage_permission" }
+                    $lineValues += $permission.value
+                }
+                "device_permissions_notification_configuration" {
+                    $permission = $device.device_permissions | Where-Object { $_.name -eq "notification_configuration" }
+                    $lineValues += $permission.value
+                }
+                "device_permissions_vpn_configuration" {
+                    $permission = $device.device_permissions | Where-Object { $_.name -eq "vpn_configuration" }
+                    $lineValues += $permission.value
+                }
+                "risky_config_encryption" { $lineValues += $device.risky_config.encryption }
+                "risky_config_lock_screen" { $lineValues += $device.risky_config.lock_screen }
+                "risky_config_developer_mode" { $lineValues += $device.risky_config.developer_mode }
+                "risky_config_usb_debugging" { $lineValues += $device.risky_config.usb_debugging }
+                "risky_config_install_non_market_apps" { $lineValues += $device.risky_config.install_non_market_apps }
+                "risky_config_packages_with_admin" {
+                    $adminPackages = $device.risky_config.packages_with_admin | ForEach-Object { $_.name }
+                    $lineValues += ($adminPackages -join ", ")
+                }
+                "risky_config_risky_network_config_external_vpn_state" { $lineValues += $device.risky_config.risky_network_config.external_vpn_state }
+                "risky_config_risky_network_config_external_vpn_state_changed_time" { $lineValues += $device.risky_config.risky_network_config.external_vpn_state_changed_time }
+                default {
+                    if ($device.PSObject.Properties[$field]) {
+                        $lineValues += $device.$field
+                    } else {
+                        $lineValues += ""
+                    }
+                }
+            }
+        }
+
+        # Join the values into a CSV-compatible line
+        $line = $lineValues -join ';'
+        Add-Content -Path $csvPathDevices -Value $line
+    }
+}
+
+# Function to handle device export
+function Export-Devices {
+    param (
+        [int]$api_limit
+    )
+
+    # Base API endpoint for devices
+    $API_DEVICES = "https://api.lookout.com/mra/api/v2/devices?state=!DEACTIVATED&limit=$api_limit"
+    $response = Invoke-API -apiUrl $API_DEVICES
+
+    if ($null -eq $response) {
+        Write-Host "Failed to retrieve devices."
+        return
+    }
+
+    $count = $response.count
+    Write-Host "Total devices: $count"
+
+    $iterations = [Math]::Ceiling($count / $api_limit)
+    $latestOID = $null
+
+    for ($round = 1; $round -le $iterations; $round++) {
+        $API_DEVICES = "https://api.lookout.com/mra/api/v2/devices?state=!DEACTIVATED&limit=$api_limit"
+        if ($latestOID) {
+            $API_DEVICES += "&oid=$latestOID"
+        }
+
+        $response = Invoke-API -apiUrl $API_DEVICES
+        if ($null -eq $response) {
+            Write-Host "Failed to retrieve devices."
+            break
+        }
+
+        $devices = $response.devices
+        Export-DevicesToCsv -devices $devices -csvPathDevices $csvPathDevices -writeHeaders ($round -eq 1)
+
+        # Update the latest OID value for the next iteration
+        $latestOID = $devices[-1].oid
+        Write-Host "Latest OID: $latestOID"
+
+        # Respect API rate limits
+        Start-Sleep -Seconds (60 / 100)
+    }
+}
+
+# Call the function with the desired API limit
+Export-Devices -api_limit 1000
+
+
+
+
+
+
+
+
+
+
+
+# Function to export issues data to CSV
+function Export-IssuesToCsv {
+    param (
+        [Parameter(Mandatory=$true)]
+        [System.Collections.ArrayList]$issues,
+
+        [Parameter(Mandatory=$true)]
+        [string]$csvPathIssues,
+
+        [Parameter(Mandatory=$true)]
+        [bool]$writeHeaders
+    )
+
+    # Define the fields to export
+    $fields = @(
+    "guid", "oid", "device_guid", "enterprise_guid", "status",
+    "risk", "type", "classification", "detected_at",
+    "resolved_at", "created_time", "device_details_external_id",
+    "device_details_mdm_connector_id", "device_details_mdm_connector_uuid"
+    )
+
+    # Write headers to the CSV file if required
+    if ($writeHeaders) {
+        $headers = $fields -join ';'
+        Set-Content -Path $csvPathIssues -Value $headers
+    }
+
+    # Iterate over each issue to create CSV lines
+    foreach ($issue in $issues) {
+        # Create an array to hold the values for each field
+        $lineValues = @()
+
+        foreach ($field in $fields) {
+            switch ($field) {
+                
+                "device_details_external_id" { $lineValues += $issue.device.details.external_id }
+                "device_details_mdm_connector_id" { $lineValues += $issue.device.details.mdm_connector_id }
+                "device_details_mdm_connectoruu_id" { $lineValues += $issue.device.details.mdm_connector_uuid }
+                default {
+                    if ($issue.PSObject.Properties[$field]) {
+                        $lineValues += $issue.$field
+                    } else {
+                        $lineValues += ""
+                    }
+                }
+            }
+        }
+
+        # Join the values into a CSV-compatible line
+        $line = $lineValues -join ';'
+        Add-Content -Path $csvPathIssues -Value $line
+    }
+}
+
+# Function to handle issue export
+function Export-Issues {
+    param (
+        [int]$api_limit
+    )
+
+    # Base API endpoint for issues
+    $API_ISSUES = "https://api.lookout.com/mra/api/v2/threats?limit=$api_limit"
+    $response = Invoke-API -apiUrl $API_ISSUES
+
+    if ($null -eq $response) {
+        Write-Host "Failed to retrieve issues."
+        return
+    }
+
+    $count = $response.count
+    Write-Host "Total issues: $count"
+
+    $iterations = [Math]::Ceiling($count / $api_limit)
+    $latestOID = $null
+
+    for ($round = 1; $round -le $iterations; $round++) {
+        $API_ISSUES = "https://api.lookout.com/mra/api/v2/threats?limit=$api_limit"
+        if ($latestOID) {
+            $API_ISSUES += "&oid=$latestOID"
+        }
+
+        $response = Invoke-API -apiUrl $API_ISSUES
+        if ($null -eq $response) {
+            Write-Host "Failed to retrieve issues."
+            break
+        }
+
+        $issues = $response.threats
+        Export-IssuesToCsv -issues $issues -csvPathIssues $csvPathIssues -writeHeaders ($round -eq 1)
+
+        # Update the latest OID value for the next iteration
+        $latestOID = $issues[-1].oid
+        Write-Host "Latest OID: $latestOID"
+
+        # Respect API rate limits
+        Start-Sleep -Seconds (60 / 100)
+    }
+}
+
+# Call the function with the desired API limit
+Export-Issues -api_limit 1000
+
+
+
+
+
+
+
+
+
+
+# Function to export PCPissues data to CSV
+function Export-PCPissuesToCsv {
+    param (
+        [Parameter(Mandatory=$true)]
+        [System.Collections.ArrayList]$PCPissues,
+
+        [Parameter(Mandatory=$true)]
+        [string]$csvPathPCPissues,
+
+        [Parameter(Mandatory=$true)]
+        [bool]$writeHeaders
+    )
+
+    # Define the fields to export
+    $fields = @(
+        "guid", "oid", "device_guid", "enterprise_guid", "status",
+        "risk", "type", "classification", "detected_at",
+        "resolved_at", "created_time", "details_url",
+        "details_reason", "details_response"
+    )
+
+    # Write headers to the CSV file if required
+    if ($writeHeaders) {
+        $headers = $fields -join ';'
+        Set-Content -Path $csvPathPCPissues -Value $headers
+    }
+
+    # Iterate over each PCPissue to create CSV lines
+    foreach ($PCPissue in $PCPissues) {
+        # Create an array to hold the values for each field
+        $lineValues = @()
+
+        foreach ($field in $fields) {
+            switch ($field) {
+                "details_url" { $lineValues += $PCPissue.details.url }
+                "details_reason" { $lineValues += $PCPissue.details.reason }
+                "details_response" { $lineValues += $PCPissue.details.response }
+                default {
+                    if ($PCPissue.PSObject.Properties[$field]) {
+                        $lineValues += $PCPissue.$field
+                    } else {
+                        $lineValues += ""
+                    }
+                }
+            }
+        }
+
+        # Join the values into a CSV-compatible line
+        $line = $lineValues -join ';'
+        Add-Content -Path $csvPathPCPissues -Value $line
+    }
+}
+
+# Function to handle PCPissue export
+function Export-PCPissues {
+    param (
+        [int]$api_limit
+    )
+
+    # Base API endpoint for PCPissues
+    $API_PCPISSUES = "https://api.lookout.com/mra/api/v2/pcp-threats?limit=$api_limit"
+    $response = Invoke-API -apiUrl $API_PCPISSUES
+
+    if ($null -eq $response) {
+        Write-Host "Failed to retrieve PCPissues."
+        return
+    }
+
+    $count = $response.count
+    Write-Host "Total PCPissues: $count"
+
+    $iterations = [Math]::Ceiling($count / $api_limit)
+    $latestOID = $null
+
+    for ($round = 1; $round -le $iterations; $round++) {
+        $API_PCPISSUES = "https://api.lookout.com/mra/api/v2/pcp-threats?limit=$api_limit"
+        if ($latestOID) {
+            $API_PCPISSUES += "&oid=$latestOID"
+        }
+
+        $response = Invoke-API -apiUrl $API_PCPISSUES
+        if ($null -eq $response) {
+            Write-Host "Failed to retrieve PCPissues."
+            break
+        }
+
+        $PCPissues = $response.threats
+        Export-PCPissuesToCsv -PCPissues $PCPissues -csvPathPCPissues $csvPathPCPissues -writeHeaders ($round -eq 1)
+
+        # Update the latest OID value for the next iteration
+        $latestOID = $PCPissues[-1].oid
+        Write-Host "Latest OID: $latestOID"
+
+        # Respect API rate limits
+        Start-Sleep -Seconds (60 / 100)
+    }
+}
+
+# Call the function with the desired API limit
+Export-PCPissues -api_limit 1000
+
+
+
+
+
+
+
+# Calculate and print the elapsed time
+$end_time = Get-Date
+$elapsed_time = $end_time - $start_time
+Write-Host "--- $($elapsed_time.TotalSeconds) seconds ---"
+
+exit
